@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       job:
-        description: "which job: hy4 (the Hy4-Flash checks), inkling (Inkling 2 Mini gates: UD-Q4_K_XL and SQ-20) inkspeed (Inkling speed: branch against 96113f298) or inkmix (Inkling mix and router groups split per kernel, UD-Q4_K_XL, branch against 5ef71af9b)"
+        description: "which job: hy4 (the Hy4-Flash checks), inkling (Inkling 2 Mini gates: UD-Q4_K_XL and SQ-20) inkspeed (Inkling speed: branch against 96113f298) or inkmix (Inkling mix and router groups split per kernel, UD-Q4_K_XL, branch against 5ef71af9b) or rel0221 (the PUBLISHED v0.2.21 and v0.2.20 SYCL packages against each other: Inkling, Hy4, Qwen engine)"
         required: false
         default: "hy4"
         type: choice
-        options: [hy4, inkling, inkspeed, inkmix]
+        options: [hy4, inkling, inkspeed, inkmix, rel0221]
   push:
     branches: [ci/intel-runner]
 
@@ -443,3 +443,61 @@ jobs:
       - name: Cleanup B70 scratch
         if: always()
         run: rm -rf "$RUNNER_TEMP/b70-ink-mix" || true
+
+  b70-rel0221:
+    name: "Arc Pro B70: published Strata v0.2.21 SYCL packages against v0.2.20 (Inkling UD-Q4_K_XL + SQ-20, Hy4, Qwen engine)"
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.job == 'rel0221' }}
+    runs-on: [self-hosted, Linux, X64, Intel]
+    timeout-minutes: 300
+    env:
+      NODE_OPTIONS: --use-system-ca
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      HF_STRATA: https://huggingface.co/strata-engine/Inkling-2-Mini-Strata/resolve/main
+      HF_UNSLOTH: https://huggingface.co/unsloth/Inkling-2-Mini-GGUF/resolve/main
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: 1. Download the published packages, check them against SHA256SUMS.txt, --version, terminal tree + venv + tokenizer
+        id: pkgs
+        run: bash .github/ci/inkrel/b70_rel.sh pkgs 2>&1 | tee -a "$RUNNER_TEMP/b70-rel0221-pkgs.log"; exit ${PIPESTATUS[0]}
+
+      - name: 2. Inkling UD-Q4_K_XL (GGUF) + dspark, 0.2.20 against 0.2.21
+        if: always() && steps.pkgs.outcome == 'success'
+        run: |
+          bash .github/ci/inkrel/b70_rel.sh inkling q4kxl "$HF_UNSLOTH/Inkling-2-Mini-UD-Q4_K_XL.gguf" Inkling-2-Mini-UD-Q4_K_XL.gguf \
+            "$HF_UNSLOTH/dspark-Inkling-2-Mini-Q8_0.gguf" dspark-Inkling-2-Mini-Q8_0.gguf 2>&1 | tee "$RUNNER_TEMP/b70-rel0221-q4kxl.log"
+          exit ${PIPESTATUS[0]}
+
+      - name: 3. Inkling SQ-20 (.strata, embedded drafter), 0.2.20 against 0.2.21
+        if: always() && steps.pkgs.outcome == 'success'
+        run: |
+          bash .github/ci/inkrel/b70_rel.sh inkling sq20 "$HF_STRATA/Inkling-2-Mini-SQ-20.strata" Inkling-2-Mini-SQ-20.strata "" "" \
+            0bbfd52344f0dd4779a7807b5f73554a812f24c035e6877b63cd0d499f7e1b97 2>&1 | tee "$RUNNER_TEMP/b70-rel0221-sq20.log"
+          exit ${PIPESTATUS[0]}
+
+      - name: "4. Hy4-Flash-SQ-64 short run, 0.1.66 against 0.1.67 (the Qwen engine has no model here, --version only in step 1)"
+        if: always() && steps.pkgs.outcome == 'success'
+        run: bash .github/ci/inkrel/b70_rel.sh hy4 2>&1 | tee "$RUNNER_TEMP/b70-rel0221-hy4.log"; exit ${PIPESTATUS[0]}
+
+      - name: 5. Summary table (0.2.20 against 0.2.21)
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/b70-rel0221/logs"
+          cp "$RUNNER_TEMP"/b70-rel0221-*.log "$RUNNER_TEMP/b70-rel0221/logs/" 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/b70-rel0221/logs/results.tsv" ]; then bash .github/ci/inkrel/b70_rel.sh summary; else echo "no results.tsv"; fi
+
+      - name: 6. Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b70-0221-release-logs
+          path: ${{ runner.temp }}/b70-rel0221/logs
+          retention-days: 14
+
+      - name: Cleanup B70 scratch
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/b70-rel0221" "$RUNNER_TEMP"/b70-rel0221-*.log || true
